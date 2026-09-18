@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+dummy_login_secret.bin
