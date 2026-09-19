@@ -1,5 +1,9 @@
+.venv/
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
-*.db
-dummy_login_secret.bin
+.env
+data/*.db
+data/*.db-*
+*.pem
+*.key
