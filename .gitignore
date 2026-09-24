@@ -5,5 +5,8 @@ __pycache__/
 .env
 data/*.db
 data/*.db-*
+data/cli_wallets/
+data/tofu/
+data/*.bin
 *.pem
 *.key
