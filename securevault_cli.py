@@ -15,6 +15,7 @@ import json
 import secrets
 import threading
 import hmac
+import ssl
 from dataclasses import asdict
 from pathlib import Path
 
@@ -200,35 +201,58 @@ def _ed_public(private_key: bytes) -> bytes:
 
 
 class CLI:
-    def __init__(self, host: str, port: int, data_dir: Path):
+    def __init__(self, host: str, port: int, data_dir: Path, ca_cert: Path):
         self.host = host
         self.port = port
         self.data_dir = data_dir
+
+        self.tls_context = ssl.create_default_context(
+            cafile=str(ca_cert)
+        )
+        self.tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+
         self.wallet_dir = data_dir / "cli_wallets"
         self.wallet_dir.mkdir(parents=True, exist_ok=True)
+
         self.current_username: str | None = None
         self.current_wallet: dict | None = None
         self.clients: dict[str, SecureVaultClient] = {}
         self.transports: dict[str, SecureVaultTCPClient] = {}
-
     def wallet_path(self, username: str) -> Path:
         return self.wallet_dir / f"{username}.json"
 
     def load_wallet_file(self, username: str) -> dict:
         path = self.wallet_path(username)
         if not path.exists():
-            raise RuntimeError(f"No local wallet for {username}. Run: signup {username}")
+            raise RuntimeError(
+                f"No local wallet for {username}. Run: signup {username}"
+            )
         return json.loads(path.read_text(encoding="utf-8"))
 
     def save_wallet(self, username: str, wallet: dict) -> None:
-        self.wallet_path(username).write_text(json.dumps(wallet, indent=2), encoding="utf-8")
-
+        self.wallet_path(username).write_text(
+            json.dumps(wallet, indent=2),
+            encoding="utf-8",
+        )
     def client(self, username: str) -> SecureVaultClient:
         if username not in self.clients:
-            transport = SecureVaultTCPClient(self.host, self.port)
-            trust = TofuTrustStore(self.data_dir / "tofu" / f"{username}.db")
+            transport = SecureVaultTCPClient(
+                self.host,
+                self.port,
+                tls_context=self.tls_context,
+            )
+
+            trust = TofuTrustStore(
+                self.data_dir / "tofu" / f"{username}.db"
+            )
+
             self.transports[username] = transport
-            self.clients[username] = SecureVaultClient(transport, username, trust)
+            self.clients[username] = SecureVaultClient(
+                transport,
+                username,
+                trust,
+            )
+
         return self.clients[username]
 
     def signup(self, username: str, password: str) -> None:
@@ -385,24 +409,45 @@ class CLI:
         for transport in self.transports.values():
             transport.close()
 
-
-def run_server(host: str, port: int, data_dir: Path) -> None:
+def run_server(
+    host: str,
+    port: int,
+    data_dir: Path,
+    cert: Path,
+    key: Path,
+) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
+
     auth = AuthService(data_dir / "users.db")
     documents = DocumentStore(data_dir / "documents.db")
+
     from src.network.request_handler import RequestHandler
     handler = RequestHandler(auth, documents)
-    server = SecureVaultTCPServer(handler, host=host, port=port)
+
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    tls_context.load_cert_chain(
+        certfile=str(cert),
+        keyfile=str(key),
+    )
+
+    server = SecureVaultTCPServer(
+        handler,
+        host=host,
+        port=port,
+        tls_context=tls_context,
+    )
+
     actual_host, actual_port = server.start()
     print(f"SecureVault server listening on {actual_host}:{actual_port}")
     print("Press Ctrl+C to stop.")
+
     try:
         threading.Event().wait()
     except KeyboardInterrupt:
         print("Stopping server...")
     finally:
         server.close()
-
 
 HELP = """Commands:
   signup USER PASSWORD                  create an account and local wallet
@@ -418,8 +463,13 @@ HELP = """Commands:
 """
 
 
-def run_shell(host: str, port: int, data_dir: Path) -> None:
-    cli = CLI(host, port, data_dir)
+def run_shell(
+    host: str,
+    port: int,
+    data_dir: Path,
+    ca_cert: Path,
+) -> None:
+    cli = CLI(host, port, data_dir, ca_cert)
     print("SecureVault interactive CLI")
     print(f"Connected target: {host}:{port}")
     print("Type 'help' for commands.")
@@ -463,16 +513,53 @@ def run_shell(host: str, port: int, data_dir: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SecureVault TCP CLI")
+    parser = argparse.ArgumentParser(
+        description="SecureVault TLS CLI"
+    )
     parser.add_argument("mode", choices=["server", "shell"])
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA)
+
+    parser.add_argument(
+        "--cert",
+        type=Path,
+        help="Server certificate; required for server mode",
+    )
+    parser.add_argument(
+        "--key",
+        type=Path,
+        help="Server private key; required for server mode",
+    )
+    parser.add_argument(
+        "--ca-cert",
+        type=Path,
+        help="Trusted server certificate; required for shell mode",
+    )
+
     args = parser.parse_args()
+
     if args.mode == "server":
-        run_server(args.host, args.port, args.data_dir)
+        if not args.cert or not args.key:
+            parser.error("server mode requires --cert and --key")
+
+        run_server(
+            args.host,
+            args.port,
+            args.data_dir,
+            args.cert,
+            args.key,
+        )
     else:
-        run_shell(args.host, args.port, args.data_dir)
+        if not args.ca_cert:
+            parser.error("shell mode requires --ca-cert")
+
+        run_shell(
+            args.host,
+            args.port,
+            args.data_dir,
+            args.ca_cert,
+        )
 
 
 if __name__ == "__main__":
